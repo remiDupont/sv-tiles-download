@@ -3,19 +3,39 @@ name: Download SV Tiles
 on:
   workflow_dispatch:
     inputs:
-      start:
-        description: 'Index de départ dans pano_ids.txt'
+      jobs:
+        description: 'Nombre de jobs parallèles (max 20)'
         required: true
-        default: '0'
-      count:
-        description: 'Nombre de panos à télécharger'
+        default: '20'
+      panos_per_job:
+        description: 'Panos par job'
         required: true
-        default: '2000'
+        default: '15000'
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: build
+        run: |
+          python3 -c "
+          import json
+          n = int('${{ inputs.jobs }}')
+          size = int('${{ inputs.panos_per_job }}')
+          matrix = {'include': [{'start': i*size, 'job_id': i} for i in range(n)]}
+          print('matrix=' + json.dumps(matrix))
+          " >> $GITHUB_OUTPUT
+
   download:
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -28,11 +48,11 @@ jobs:
       - name: Install deps
         run: pip install requests Pillow
 
-      - name: Download tiles
+      - name: Download tiles (job ${{ matrix.job_id }})
         run: |
           python download.py \
-            --start ${{ inputs.start }} \
-            --count ${{ inputs.count }} \
+            --start ${{ matrix.start }} \
+            --count ${{ inputs.panos_per_job }} \
             --panos pano_ids.txt
 
       - name: Sync to gc2
@@ -43,8 +63,8 @@ jobs:
         run: |
           echo "$GC2_KEY" > /tmp/gc2_key
           chmod 600 /tmp/gc2_key
-          rsync -az --progress \
+          rsync -az \
             -e "ssh -i /tmp/gc2_key -o StrictHostKeyChecking=no -o ConnectTimeout=30" \
             output/ \
             ${GC2_USER}@${GC2_IP}:~/data/ancres/ancres_sans_API/
-          echo "Sync terminé"
+          echo "Job ${{ matrix.job_id }} — sync terminé"
