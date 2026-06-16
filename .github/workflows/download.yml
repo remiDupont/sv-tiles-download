@@ -48,23 +48,20 @@ jobs:
       - name: Install deps
         run: pip install requests Pillow
 
+      - name: Write SSH key
+        env:
+          GC2_KEY: ${{ secrets.GC2_SSH_KEY }}
+        run: |
+          echo "$GC2_KEY" > /tmp/gc2_key
+          chmod 600 /tmp/gc2_key
+
       - name: Download tiles (job ${{ matrix.job_id }})
+        env:
+          GC2_IP: ${{ secrets.GC2_IP }}
+          GC2_USER: ${{ secrets.GC2_USER }}
         run: |
           python download.py \
             --start ${{ matrix.start }} \
             --count ${{ inputs.panos_per_job }} \
-            --panos pano_ids.txt
-
-      - name: Sync to gc2
-        env:
-          GC2_KEY: ${{ secrets.GC2_SSH_KEY }}
-          GC2_IP: ${{ secrets.GC2_IP }}
-          GC2_USER: ${{ secrets.GC2_USER }}
-        run: |
-          echo "$GC2_KEY" > /tmp/gc2_key
-          chmod 600 /tmp/gc2_key
-          rsync -az \
-            -e "ssh -i /tmp/gc2_key -o StrictHostKeyChecking=no -o ConnectTimeout=30" \
-            output/ \
-            ${GC2_USER}@${GC2_IP}:~/data/ancres/ancres_sans_API/
-          echo "Job ${{ matrix.job_id }} — sync terminé"
+            --panos pano_ids.txt \
+            --gc2-key /tmp/gc2_key
