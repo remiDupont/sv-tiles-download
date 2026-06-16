@@ -1,0 +1,50 @@
+name: Download SV Tiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: 'Index de départ dans pano_ids.txt'
+        required: true
+        default: '0'
+      count:
+        description: 'Nombre de panos à télécharger'
+        required: true
+        default: '2000'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests Pillow
+
+      - name: Download tiles
+        run: |
+          python download.py \
+            --start ${{ inputs.start }} \
+            --count ${{ inputs.count }} \
+            --panos pano_ids.txt
+
+      - name: Sync to gc2
+        env:
+          GC2_KEY: ${{ secrets.GC2_SSH_KEY }}
+          GC2_IP: ${{ secrets.GC2_IP }}
+          GC2_USER: ${{ secrets.GC2_USER }}
+        run: |
+          echo "$GC2_KEY" > /tmp/gc2_key
+          chmod 600 /tmp/gc2_key
+          rsync -az --progress \
+            -e "ssh -i /tmp/gc2_key -o StrictHostKeyChecking=no -o ConnectTimeout=30" \
+            output/ \
+            ${GC2_USER}@${GC2_IP}:~/data/ancres/ancres_sans_API/
+          echo "Sync terminé"
