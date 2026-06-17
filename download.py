@@ -35,18 +35,29 @@ def make_session():
     })
     return s
 
-def rsync(out, gc2_user, gc2_ip, key_path, direction):
+def get_done_on_gc2(gc2_user, gc2_ip, key_path):
+    """Liste les pano_ids déjà faits sur gc2 via SSH find (texte seul, rapide)."""
+    result = subprocess.run(
+        ["ssh", "-i", key_path, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30",
+         f"{gc2_user}@{gc2_ip}",
+         r"find ~/data/ancres/ancres_sans_API -maxdepth 2 -name .done -printf '%h\n'"
+         r" | sed 's|.*/||'"],
+        capture_output=True, text=True, timeout=300
+    )
+    if result.returncode != 0:
+        print(f"  SSH find warning: {result.stderr[:200]}")
+        return set()
+    return set(result.stdout.strip().split('\n'))
+
+def rsync_push(out, gc2_user, gc2_ip, key_path):
     ssh = f"ssh -i {key_path} -o StrictHostKeyChecking=no -o ConnectTimeout=30"
     remote = f"{gc2_user}@{gc2_ip}:~/data/ancres/ancres_sans_API/"
-    if direction == "pull":
-        # Récupère seulement les .done depuis gc2 (léger, pour le skip initial)
-        cmd = ["rsync", "-az", "--include=*/", "--include=.done",
-               "--exclude=*", "-e", ssh, remote, str(out) + "/"]
-    else:
-        cmd = ["rsync", "-az", "-e", ssh, str(out) + "/", remote]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(
+        ["rsync", "-az", "-e", ssh, str(out) + "/", remote],
+        capture_output=True, text=True, timeout=600
+    )
     if result.returncode != 0:
-        print(f"  rsync {direction} warning: {result.stderr[:300]}")
+        print(f"  rsync push warning: {result.stderr[:300]}")
     return result.returncode == 0
 
 def download_pano(pano_id, out_dir, session):
@@ -101,11 +112,17 @@ def main():
     out = Path("output")
     out.mkdir(exist_ok=True)
 
-    # ── Sync initial : récupère les .done depuis gc2 → skip automatique ──
+    # ── Sync initial : liste les .done sur gc2, crée les fichiers locaux ──
     if gc2_ok:
-        print("Sync initial (pull .done depuis gc2)...")
-        rsync(out, args.gc2_user, args.gc2_ip, args.gc2_key, "pull")
-        already = sum(1 for pid in batch if (out / pid / ".done").exists())
+        print("Récupération des panos déjà faits sur gc2 (SSH find)...")
+        done_gc2 = get_done_on_gc2(args.gc2_user, args.gc2_ip, args.gc2_key)
+        already = 0
+        for pid in batch:
+            if pid in done_gc2:
+                d = out / pid
+                d.mkdir(parents=True, exist_ok=True)
+                (d / ".done").write_text("ok")
+                already += 1
         print(f"  {already} déjà faits sur gc2 → skippés")
 
     session = make_session()
@@ -120,7 +137,7 @@ def main():
         # ── Rsync progressif toutes les SYNC_EVERY réussites ─────────────
         if gc2_ok and ok > 0 and ok % SYNC_EVERY == 0:
             print(f"  [{i+1}/{len(batch)}] ok={ok} fail={fail} skip={skip} — sync gc2...")
-            rsync(out, args.gc2_user, args.gc2_ip, args.gc2_key, "push")
+            rsync_push(out, args.gc2_user, args.gc2_ip, args.gc2_key)
 
         if (i + 1) % 50 == 0:
             print(f"  [{i+1}/{len(batch)}] ok={ok} fail={fail} skip={skip}")
@@ -128,7 +145,7 @@ def main():
     # ── Sync final ────────────────────────────────────────────────────────
     print(f"Terminé: ok={ok} fail={fail} skip={skip} — sync final gc2...")
     if gc2_ok:
-        rsync(out, args.gc2_user, args.gc2_ip, args.gc2_key, "push")
+        rsync_push(out, args.gc2_user, args.gc2_ip, args.gc2_key)
 
 if __name__ == "__main__":
     main()
