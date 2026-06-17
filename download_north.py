@@ -1,15 +1,17 @@
 """
 Télécharge 1 thumbnail yaw=0 (vue nord géographique) par pano_id.
-1 requête/pano, ~150KB, délai 0.5-1.0s.
+1 requête/pano, ~150KB, 4 threads parallèles par job.
 Sortie: ancres_sans_API/{pano_id}/thumb_north.jpg + .north_done
 """
-import argparse, os, random, subprocess, time
+import argparse, os, random, subprocess, time, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-DELAY_MIN, DELAY_MAX = 0.5, 1.0
+DELAY_MIN, DELAY_MAX = 0.8, 1.5   # délai par thread (4 threads → 4 req/s par IP)
+THREADS = 4
 SYNC_EVERY = 500
 
 USER_AGENTS = [
@@ -19,17 +21,24 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
 ]
 
+_tls = threading.local()
+
 def make_session():
     s = requests.Session()
     s.mount("https://", HTTPAdapter(
         max_retries=Retry(total=4, backoff_factor=2,
                           status_forcelist=[429, 500, 502, 503, 504]),
-        pool_maxsize=4))
+        pool_maxsize=THREADS * 2))
     s.headers.update({
         "User-Agent": random.choice(USER_AGENTS),
         "Referer": "https://www.google.com/maps/",
     })
     return s
+
+def get_session():
+    if not hasattr(_tls, "session"):
+        _tls.session = make_session()
+    return _tls.session
 
 def get_done_on_gc2(gc2_user, gc2_ip, key_path):
     result = subprocess.run(
@@ -56,12 +65,12 @@ def rsync_push(out, gc2_user, gc2_ip, key_path):
         print(f"  rsync push warning: {result.stderr[:300]}")
     return result.returncode == 0
 
-def download_north(pano_id, out_dir, session):
+def download_north(pano_id, out_dir):
     d = out_dir / pano_id
     if (d / ".north_done").exists():
         return "skip"
     d.mkdir(parents=True, exist_ok=True)
-
+    session = get_session()
     try:
         r = session.get(
             "https://streetviewpixels-pa.googleapis.com/v1/thumbnail",
@@ -112,22 +121,30 @@ def main():
                 already += 1
         print(f"  {already} déjà faits → skippés")
 
-    session = make_session()
     ok = fail = skip = 0
+    lock = threading.Lock()
+    counter = [0]
 
-    for i, pid in enumerate(batch):
-        res = download_north(pid, out, session)
-        if res == "ok":     ok += 1
-        elif res == "fail": fail += 1
-        else:               skip += 1
+    def work(pid):
+        res = download_north(pid, out)
+        with lock:
+            if res == "ok":     ok_ref[0] += 1
+            elif res == "fail": fail_ref[0] += 1
+            else:               skip_ref[0] += 1
+            counter[0] += 1
+            i = counter[0]
+            if ok_ref[0] > 0 and ok_ref[0] % SYNC_EVERY == 0 and gc2_ok:
+                print(f"  [{i}/{len(batch)}] ok={ok_ref[0]} fail={fail_ref[0]} skip={skip_ref[0]} — sync gc2...")
+                rsync_push(out, args.gc2_user, args.gc2_ip, args.gc2_key)
+            if i % 200 == 0:
+                print(f"  [{i}/{len(batch)}] ok={ok_ref[0]} fail={fail_ref[0]} skip={skip_ref[0]}")
 
-        if gc2_ok and ok > 0 and ok % SYNC_EVERY == 0:
-            print(f"  [{i+1}/{len(batch)}] ok={ok} fail={fail} skip={skip} — sync gc2...")
-            rsync_push(out, args.gc2_user, args.gc2_ip, args.gc2_key)
+    ok_ref = [0]; fail_ref = [0]; skip_ref = [0]
 
-        if (i + 1) % 100 == 0:
-            print(f"  [{i+1}/{len(batch)}] ok={ok} fail={fail} skip={skip}")
+    with ThreadPoolExecutor(max_workers=THREADS) as ex:
+        list(ex.map(work, batch))
 
+    ok, fail, skip = ok_ref[0], fail_ref[0], skip_ref[0]
     print(f"Terminé: ok={ok} fail={fail} skip={skip} — sync final...")
     if gc2_ok:
         rsync_push(out, args.gc2_user, args.gc2_ip, args.gc2_key)
