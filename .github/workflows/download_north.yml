@@ -1,0 +1,67 @@
+name: Download North Thumbnails
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'Nombre de jobs parallèles (max 20)'
+        required: true
+        default: '20'
+      panos_per_job:
+        description: 'Panos par job'
+        required: true
+        default: '15000'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: build
+        run: |
+          python3 -c "
+          import json
+          n = int('${{ inputs.jobs }}')
+          size = int('${{ inputs.panos_per_job }}')
+          matrix = {'include': [{'start': i*size, 'job_id': i} for i in range(n)]}
+          print('matrix=' + json.dumps(matrix))
+          " >> $GITHUB_OUTPUT
+
+  download:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Write SSH key
+        env:
+          GC2_KEY: ${{ secrets.GC2_SSH_KEY }}
+        run: |
+          echo "$GC2_KEY" > /tmp/gc2_key
+          chmod 600 /tmp/gc2_key
+
+      - name: Download north thumbnails (job ${{ matrix.job_id }})
+        env:
+          GC2_IP: ${{ secrets.GC2_IP }}
+          GC2_USER: ${{ secrets.GC2_USER }}
+        run: |
+          python download_north.py \
+            --start ${{ matrix.start }} \
+            --count ${{ inputs.panos_per_job }} \
+            --panos pano_ids.txt \
+            --gc2-key /tmp/gc2_key
